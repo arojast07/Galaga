@@ -494,13 +494,12 @@ class GameScene extends Phaser.Scene {
     var p2 = this.players[1] || this.players[0];
     if (!p2 || p2.isDead || p2._isRemote) return;
 
-    var inputData = {
-      left:  p2.keyLeft  ? p2.keyLeft.isDown  : false,
-      right: p2.keyRight ? p2.keyRight.isDown : false,
-      fire:  p2.keyFire  ? p2.keyFire.isDown  : false,
-      slot:  'player2',
-    };
-    OnlineSync.sendInput(inputData);
+    var left  = p2.keyLeft  ? p2.keyLeft.isDown  : false;
+    var right = p2.keyRight ? p2.keyRight.isDown : false;
+    var fire  = p2.keyFire  ? p2.keyFire.isDown  : false;
+
+    // onlineSync maneja throttle y deteccion de cambio internamente
+    OnlineSync.sendInput(left, right, fire);
   }
 
   _applySnapshot(state) {
@@ -549,24 +548,19 @@ class GameScene extends Phaser.Scene {
       var sp2 = state.players[1];
       var lp2 = this.players[1];
 
-      console.log('[ONLINE] guest predicted player2 x/y:', Math.round(lp2.x), Math.round(lp2.y));
-      console.log('[ONLINE] host authoritative player2 x/y:', sp2.x, sp2.y);
-
-      var dx2 = sp2.x - lp2.x;
-      var dy2 = sp2.y - lp2.y;
+      var dx2   = sp2.x - lp2.x;
+      var dy2   = sp2.y - lp2.y;
       var dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-      console.log('[ONLINE] reconcile player2 delta:', Math.round(dist2));
 
-      // Correccion de posicion
-      if (dist2 > 80) {
+      // Correccion suave: interpolar si delta < 60px, directo si es mayor
+      if (dist2 > 60) {
         lp2.setPosition(sp2.x, sp2.y);
-      } else if (dist2 > 6) {
-        lp2.setPosition(lp2.x + dx2 * 0.35, lp2.y + dy2 * 0.35);
+      } else if (dist2 > 5) {
+        lp2.setPosition(lp2.x + dx2 * 0.3, lp2.y + dy2 * 0.3);
       }
 
-      // Sincronizar vidas desde host
+      // Sincronizar vidas desde host (sin log por frame)
       if (sp2.lives !== undefined && sp2.lives !== lp2.lives) {
-        console.log('[ONLINE] player2 lives from host:', sp2.lives);
         lp2.lives = sp2.lives;
         this.events.emit('updateLivesP', 1, lp2.lives);
       }
@@ -578,7 +572,6 @@ class GameScene extends Phaser.Scene {
         lp2.setVisible(false);
         if (lp2.shieldFx) lp2.shieldFx.setVisible(false);
         this._spawnExplosion(lp2.x, lp2.y, 0x00ccff);
-        // Verificar si todos muertos para game over
         var allDead = this.players.every(function(p) { return p.isDead; });
         if (allDead) {
           var self2 = this;
@@ -616,23 +609,20 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    console.log('[ONLINE] snapshot applied successfully');
+    console.log('[ONLINE] snapshot applied');
   }
 
   _applyGuestInput(input) {
     if (!input || !this.players[1]) return;
     var p2 = this.players[1];
     if (p2.isDead) return;
-    console.log('[ONLINE] input recibido del guest. left:', input.left, 'right:', input.right, 'fire:', input.fire);
     var speed = 220;
     if (input.left)       p2.setVelocityX(-speed);
     else if (input.right) p2.setVelocityX(speed);
     else                  p2.setVelocityX(0);
     if (input.fire) {
       var now = this.time.now;
-      if (now > p2.lastFired + p2.fireRate) {
-        p2._shoot(now);
-      }
+      if (now > p2.lastFired + p2.fireRate) p2._shoot(now);
     }
   }
 }
