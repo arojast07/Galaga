@@ -1,7 +1,6 @@
 /**
  * roomService.js
  * Gestiona creacion, union y escucha de salas online.
- * Todos los metodos son async y loguean errores reales.
  */
 
 var RoomService = (function() {
@@ -9,11 +8,6 @@ var RoomService = (function() {
 
   // ── Generacion de codigo ───────────────────────────────────────────────
 
-  /**
-   * Genera un codigo de 4 digitos unico (no en uso en salas activas).
-   * Intenta hasta 5 veces antes de fallar.
-   * @returns {Promise<string>} codigo de 4 digitos
-   */
   async function generateRoomCode() {
     for (var i = 0; i < 5; i++) {
       var code = String(Math.floor(1000 + Math.random() * 9000));
@@ -28,29 +22,19 @@ var RoomService = (function() {
 
       if (res.error) {
         console.warn('[ROOM] error verificando codigo:', res.error.message);
-        // Si hay error de red, igual usamos el codigo generado
         return code;
       }
-
       if (!res.data) {
-        // Codigo libre
         console.log('[ROOM] codigo disponible: ' + code);
         return code;
       }
-
       console.log('[ROOM] codigo ' + code + ' ya en uso, reintentando...');
     }
-
     throw new Error('No se pudo generar un codigo unico tras 5 intentos.');
   }
 
   // ── Crear sala ─────────────────────────────────────────────────────────
 
-  /**
-   * Crea una sala nueva como host (player1).
-   * @param {string} playerName
-   * @returns {Promise<{roomCode: string, roomId: string}>}
-   */
   async function createRoom(playerName) {
     console.log('[ROOM] createRoom iniciado');
     console.log('[ROOM] supabase client existe:', !!db);
@@ -76,7 +60,6 @@ var RoomService = (function() {
     var roomId = insertRes.data.id;
     console.log('[ROOM] sala creada, id:', roomId);
 
-    // Registrar player1
     var playerRes = await db.from('room_players').insert({
       room_id:     roomId,
       player_slot: 'player1',
@@ -85,10 +68,8 @@ var RoomService = (function() {
       score:       0,
       lives:       3,
     });
-
     if (playerRes.error) {
       console.warn('[ROOM] advertencia al registrar player1:', playerRes.error.message);
-      // No es fatal, continuar
     }
 
     console.log('[ROOM] sala creada correctamente. Codigo:', code);
@@ -97,52 +78,42 @@ var RoomService = (function() {
 
   // ── Unirse a sala ──────────────────────────────────────────────────────
 
-  /**
-   * Une a un jugador como guest (player2).
-   * @param {string} roomCode  codigo de 4 digitos
-   * @param {string} playerName
-   * @returns {Promise<{roomId: string, slot: string} | null>}
-   *   null = sala no encontrada o llena
-   */
   async function joinRoom(roomCode, playerName) {
-    console.log('[ROOM] buscando sala:', roomCode, 'para:', playerName);
+    console.log('[JOIN] joinRoom iniciado');
+    console.log('[JOIN] nombre recibido:', playerName);
+    console.log('[JOIN] codigo recibido:', roomCode);
 
+    var cleanCode = String(roomCode).trim();
+    console.log('[JOIN] buscando sala por room_code:', cleanCode);
+
+    // Buscar sala activa con ese codigo (waiting o ready sin guest)
     var res = await db
       .from('rooms')
       .select('*')
-      .eq('room_code', roomCode)
-      .eq('status', 'waiting')
+      .eq('room_code', cleanCode)
+      .in('status', ['waiting'])
       .maybeSingle();
 
     if (res.error) {
-      console.error('[ROOM] error buscando sala:', res.error.message);
+      console.error('[JOIN] error real:', res.error.message);
       throw new Error('Error Supabase al buscar sala: ' + res.error.message);
     }
 
     if (!res.data) {
-      console.log('[ROOM] sala no encontrada o no disponible para codigo:', roomCode);
+      console.log('[JOIN] sala no encontrada para codigo:', cleanCode);
       return null;
     }
 
     var room = res.data;
+    console.log('[JOIN] sala encontrada:', room.id, 'status:', room.status, 'guest:', room.guest_name);
 
     if (room.guest_name) {
-      console.log('[ROOM] sala llena, ya tiene guest:', room.guest_name);
+      console.log('[JOIN] sala llena, ya tiene guest:', room.guest_name);
       return { full: true };
     }
 
-    // Actualizar sala
-    var updateRes = await db.from('rooms').update({
-      guest_name: playerName,
-      status:     'ready',
-    }).eq('id', room.id);
-
-    if (updateRes.error) {
-      console.error('[ROOM] error actualizando sala:', updateRes.error.message);
-      throw new Error('Error Supabase al actualizar sala: ' + updateRes.error.message);
-    }
-
-    // Registrar player2
+    // Insertar player2 PRIMERO
+    console.log('[JOIN] insertando player2...');
     var playerRes = await db.from('room_players').insert({
       room_id:     room.id,
       player_slot: 'player2',
@@ -153,10 +124,27 @@ var RoomService = (function() {
     });
 
     if (playerRes.error) {
-      console.warn('[ROOM] advertencia al registrar player2:', playerRes.error.message);
+      console.error('[JOIN] error insertando player2:', playerRes.error.message);
+      // No es fatal si ya existe, continuar
+    } else {
+      console.log('[JOIN] player2 insertado correctamente');
     }
 
-    console.log('[ROOM] unido correctamente a sala:', roomCode, 'como player2');
+    // Actualizar rooms a ready DESPUES
+    console.log('[JOIN] actualizando room a ready...');
+    var updateRes = await db.from('rooms').update({
+      guest_name: playerName,
+      status:     'ready',
+      updated_at: new Date().toISOString(),
+    }).eq('id', room.id).select();
+
+    if (updateRes.error) {
+      console.error('[JOIN] error real al actualizar room:', updateRes.error.message);
+      throw new Error('Error Supabase al actualizar sala: ' + updateRes.error.message);
+    }
+
+    console.log('[JOIN] room actualizada correctamente:', updateRes.data);
+    console.log('[JOIN] union completada como player2 en sala:', cleanCode);
     return { roomId: room.id, slot: 'player2' };
   }
 
@@ -164,36 +152,80 @@ var RoomService = (function() {
 
   /**
    * Suscribe a cambios en tiempo real de una sala.
+   * Escucha la tabla rooms SIN filtro de id para maximizar compatibilidad
+   * con proyectos que no tienen replica identity full configurada.
+   * Filtra manualmente por roomId en el callback.
+   *
+   * Tambien inicia un polling de fallback cada 2s por si realtime no dispara.
+   *
    * @param {string} roomId
-   * @param {function} callback  recibe el payload de Supabase Realtime
-   * @returns {object} canal (para desuscribirse)
+   * @param {function} callback  recibe el payload
+   * @returns {object} { channel, stopPolling }
    */
   function subscribeToRoom(roomId, callback) {
     console.log('[ROOM] suscribiendo a realtime de sala:', roomId);
 
+    // Suscripcion realtime SIN filtro (evita problemas de replica identity)
     var channel = db
-      .channel('room_changes_' + roomId)
+      .channel('room_watch_' + roomId + '_' + Date.now())
       .on('postgres_changes', {
         event:  'UPDATE',
         schema: 'public',
         table:  'rooms',
-        filter: 'id=eq.' + roomId,
       }, function(payload) {
-        console.log('[ROOM] cambio recibido en sala:', payload.new && payload.new.status);
-        callback(payload);
+        console.log('[ROOM] realtime payload recibido:', JSON.stringify(payload.new));
+        // Filtrar manualmente por id
+        if (payload.new && payload.new.id === roomId) {
+          console.log('[ROOM] nuevo status detectado:', payload.new.status);
+          console.log('[ROOM] guest_name detectado:', payload.new.guest_name);
+          if (payload.new.status === 'ready') {
+            console.log('[ROOM] sala lista para iniciar');
+          }
+          callback(payload);
+        }
       })
       .subscribe(function(status) {
         console.log('[ROOM] estado de suscripcion realtime:', status);
       });
 
-    return channel;
+    // Polling fallback: consulta cada 2s por si realtime no dispara
+    var pollingActive = true;
+    var pollInterval = setInterval(async function() {
+      if (!pollingActive) return;
+      try {
+        var pollRes = await db
+          .from('rooms')
+          .select('id, status, guest_name, updated_at')
+          .eq('id', roomId)
+          .single();
+
+        if (pollRes.data && pollRes.data.status === 'ready') {
+          console.log('[ROOM] polling detecto sala ready:', pollRes.data);
+          pollingActive = false;
+          clearInterval(pollInterval);
+          callback({ new: pollRes.data });
+        }
+      } catch (e) {
+        // silencioso
+      }
+    }, 2000);
+
+    function stopPolling() {
+      pollingActive = false;
+      clearInterval(pollInterval);
+    }
+
+    return { channel: channel, stopPolling: stopPolling };
   }
 
   // ── Estado ─────────────────────────────────────────────────────────────
 
   async function updateRoomStatus(roomId, status) {
     console.log('[ROOM] actualizando status a:', status);
-    var res = await db.from('rooms').update({ status: status }).eq('id', roomId);
+    var res = await db.from('rooms').update({
+      status:     status,
+      updated_at: new Date().toISOString(),
+    }).eq('id', roomId);
     if (res.error) console.error('[ROOM] error actualizando status:', res.error.message);
   }
 
@@ -211,7 +243,10 @@ var RoomService = (function() {
       .eq('player_slot', slot);
 
     if (slot === 'player1') {
-      await db.from('rooms').update({ status: 'finished' }).eq('id', roomId);
+      await db.from('rooms').update({
+        status:     'finished',
+        updated_at: new Date().toISOString(),
+      }).eq('id', roomId);
     }
   }
 

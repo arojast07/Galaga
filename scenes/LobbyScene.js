@@ -170,12 +170,26 @@ class LobbyScene extends Phaser.Scene {
 
   _subscribeToRoom() {
     var self = this;
-    if (this._roomChannel) {
-      supabaseClient.removeChannel(this._roomChannel);
+
+    // Limpiar suscripcion anterior
+    if (this._roomSubscription) {
+      if (this._roomSubscription.stopPolling) this._roomSubscription.stopPolling();
+      if (this._roomSubscription.channel) supabaseClient.removeChannel(this._roomSubscription.channel);
+      this._roomSubscription = null;
     }
-    this._roomChannel = RoomService.subscribeToRoom(this._roomId, function(payload) {
-      if (payload.new && payload.new.status) {
-        self._onRoomStatusChange(payload.new.status);
+
+    this._roomSubscription = RoomService.subscribeToRoom(this._roomId, function(payload) {
+      console.log('[ROOM] realtime payload recibido en lobby:', JSON.stringify(payload.new));
+      var newStatus = payload.new && payload.new.status;
+      console.log('[ROOM] nuevo status detectado:', newStatus);
+      if (payload.new && payload.new.guest_name) {
+        console.log('[ROOM] guest_name detectado:', payload.new.guest_name);
+      }
+      if (newStatus === 'ready') {
+        console.log('[ROOM] sala lista para iniciar');
+        self._onRoomStatusChange('ready');
+      } else if (newStatus === 'finished') {
+        self._onRoomStatusChange('finished');
       }
     });
   }
@@ -195,14 +209,14 @@ class LobbyScene extends Phaser.Scene {
   }
 
   _startOnlineGame() {
-    // Limpiar inputs DOM antes de cambiar escena
     this._removeDomInputs();
-    if (this._roomChannel) supabaseClient.removeChannel(this._roomChannel);
-
-    // Inicializar sincronizacion
+    // Detener polling y canal realtime
+    if (this._roomSubscription) {
+      if (this._roomSubscription.stopPolling) this._roomSubscription.stopPolling();
+      if (this._roomSubscription.channel) supabaseClient.removeChannel(this._roomSubscription.channel);
+      this._roomSubscription = null;
+    }
     OnlineSync.init(this._roomId, this._playerSlot, null);
-
-    // Pasar datos a GameScene
     this.scene.start('GameScene', {
       playerCount:  2,
       onlineMode:   true,
@@ -356,9 +370,10 @@ class LobbyScene extends Phaser.Scene {
   // Limpiar al salir de la escena
   shutdown() {
     this._removeDomInputs();
-    if (this._roomChannel) {
-      supabaseClient.removeChannel(this._roomChannel);
-      this._roomChannel = null;
+    if (this._roomSubscription) {
+      if (this._roomSubscription.stopPolling) this._roomSubscription.stopPolling();
+      if (this._roomSubscription.channel) supabaseClient.removeChannel(this._roomSubscription.channel);
+      this._roomSubscription = null;
     }
   }
 }
