@@ -435,7 +435,8 @@ class GameScene extends Phaser.Scene {
 
       this.formation.update(time, delta, positions);
 
-      if (this.formation.isEmpty()) {
+      // En online guest, la progresion de oleadas la manda el host (state.wave)
+      if ((!this.onlineMode || this.isHost) && this.formation.isEmpty()) {
         this.waveActive = false;
         this.formation.destroy();
         this.wave++;
@@ -461,73 +462,66 @@ class GameScene extends Phaser.Scene {
   // ── Sincronizacion online ──────────────────────────────────────────────
 
   _publishOnlineSnapshot() {
-    var playersState = this.players.map(function(p) {
-      return {
-        x:            Math.round(p.x),
-        y:            Math.round(p.y),
-        lives:        p.lives,
-        isDead:       p.isDead,
-        isInvincible: p.isInvincible,
-        visible:      p.visible,
-      };
-    });
+    var self = this;
+    var TYPE_TO = { basic: 0, fast: 1, tough: 2, miniboss: 3 };
+    var V2 = OnlineSync.SNAPSHOT_V2;
 
-    var enemiesState = [];
+    var pRows = [];
+    for (var pi = 0; pi < this.players.length; pi++) {
+      var pl = this.players[pi];
+      var f = (pl.isDead ? 1 : 0) | (pl.isInvincible ? 2 : 0) | (pl.visible !== false ? 4 : 0);
+      pRows.push([Math.round(pl.x), Math.round(pl.y), pl.lives, f]);
+    }
+
+    var eRows = [];
     if (this.formation) {
-      this.formation.enemies.getChildren().forEach(function(e, idx) {
-        if (e.active) {
-          enemiesState.push({
-            id:     idx,
-            x:      Math.round(e.x),
-            y:      Math.round(e.y),
-            hp:     e.hp,
-            type:   e.enemyType,
-            active: true,
-          });
-        }
+      this.formation.enemies.getChildren().forEach(function(en, idx) {
+        if (!en || !en.active || !en.visible) return;
+        var tid = TYPE_TO[en.enemyType];
+        if (tid === undefined) tid = 0;
+        eRows.push([
+          (en.netId !== undefined && en.netId !== null) ? en.netId : ('e_' + idx),
+          Math.round(en.x),
+          Math.round(en.y),
+          en.hp,
+          tid,
+        ]);
       });
     }
 
-    // Incluir balas del host (player1) y balas enemigas para el guest
-    var bulletsState = [];
-    // Balas del jugador host (player1)
-    if (this.players[0] && this.players[0].bullets) {
-      this.players[0].bullets.getChildren().forEach(function(b) {
-        if (b.active) {
-          bulletsState.push({
-            id:    'p1_' + Math.round(b.x) + '_' + Math.round(b.y),
-            x:     Math.round(b.x),
-            y:     Math.round(b.y),
-            vx:    0,
-            vy:    -520,
-            owner: 'player1',
-          });
-        }
+    var pbRows = [];
+    function pushPlayerBullets(playerIndex, poCode) {
+      var plb = self.players[playerIndex];
+      if (!plb || !plb.bullets) return;
+      plb.bullets.getChildren().forEach(function(b) {
+        if (!b || !b.active || !b.visible) return;
+        var nid = (b.netId !== undefined && b.netId !== null) ? b.netId : null;
+        if (!nid) return;
+        pbRows.push([nid, Math.round(b.x), Math.round(b.y), poCode]);
       });
     }
-    // Balas enemigas
+    pushPlayerBullets(0, 0);
+    if (this.players.length > 1) pushPlayerBullets(1, 1);
+
+    var ebRows = [];
     if (this.enemyBullets) {
-      this.enemyBullets.getChildren().forEach(function(b, idx) {
-        if (b.active) {
-          bulletsState.push({
-            id:    'eb_' + idx,
-            x:     Math.round(b.x),
-            y:     Math.round(b.y),
-            vx:    0,
-            vy:    300,
-            owner: 'enemy',
-          });
-        }
+      this.enemyBullets.getChildren().forEach(function(b) {
+        if (!b || !b.active || !b.visible) return;
+        var nid = (b.netId !== undefined && b.netId !== null) ? b.netId : null;
+        if (!nid) return;
+        ebRows.push([nid, Math.round(b.x), Math.round(b.y)]);
       });
     }
 
     OnlineSync.publishSnapshot({
-      players:  playersState,
-      enemies:  enemiesState,
-      bullets:  bulletsState,
-      wave:     this.wave,
-      score:    this.score,
-      gameOver: this.gameOver,
+      _v: V2,
+      w:  this.wave,
+      s:  this.score,
+      g:  this.gameOver ? 1 : 0,
+      p:  pRows,
+      e:  eRows,
+      pb: pbRows,
+      eb: ebRows,
     });
   }
 
@@ -545,37 +539,39 @@ class GameScene extends Phaser.Scene {
    * Se llama una vez al crear la escena en modo guest.
    */
   _initRemoteBulletPool() {
-    this._remoteBullets = {};  // id -> Phaser.GameObjects.Image
+    this._remotePb = {};
+    this._remoteEb = {};
     this._remoteBulletPool = [];
-    // Pre-crear 40 sprites de bala para reutilizar
-    for (var i = 0; i < 40; i++) {
+    this._remoteBulletPoolIdx = 0;
+    this._guestBulletLogTick = 0;
+    for (var i = 0; i < 120; i++) {
       var spr = this.add.image(-100, -100, 'bullet_player')
         .setDepth(5).setVisible(false).setAlpha(0.85);
       this._remoteBulletPool.push(spr);
     }
-    this._remoteBulletPoolIdx = 0;
     console.log('[ONLINE] guest interpolation active');
   }
 
-  _getRemoteBulletSprite(id) {
-    if (this._remoteBullets[id]) return this._remoteBullets[id];
-    // Reutilizar del pool circular
+  _getRemoteBulletSprite(id, map) {
+    if (map[id]) return map[id];
     var spr = this._remoteBulletPool[this._remoteBulletPoolIdx % this._remoteBulletPool.length];
     this._remoteBulletPoolIdx++;
-    // Liberar id anterior si este sprite estaba asignado
-    for (var k in this._remoteBullets) {
-      if (this._remoteBullets[k] === spr) { delete this._remoteBullets[k]; break; }
+    for (var kp in this._remotePb) {
+      if (this._remotePb[kp] === spr) { delete this._remotePb[kp]; break; }
+    }
+    for (var ke in this._remoteEb) {
+      if (this._remoteEb[ke] === spr) { delete this._remoteEb[ke]; break; }
     }
     spr.setVisible(true);
-    this._remoteBullets[id] = spr;
+    map[id] = spr;
     return spr;
   }
 
-  _hideUnusedRemoteBullets(activeIds) {
-    for (var id in this._remoteBullets) {
-      if (activeIds.indexOf(id) === -1) {
-        this._remoteBullets[id].setVisible(false).setPosition(-100, -100);
-        delete this._remoteBullets[id];
+  _hideUnusedInBulletMap(map, seen) {
+    for (var id in map) {
+      if (!seen[id]) {
+        map[id].setVisible(false).setPosition(-100, -100);
+        delete map[id];
       }
     }
   }
@@ -588,7 +584,9 @@ class GameScene extends Phaser.Scene {
       this.score = state.score;
       this.events.emit('updateScore', this.score);
     }
-    if (state.wave !== undefined && state.wave !== this.wave) {
+    if (this.onlineMode && !this.isHost && state.wave !== undefined && state.wave !== this.wave) {
+      this._syncWaveFromHost(state.wave);
+    } else if (state.wave !== undefined && state.wave !== this.wave) {
       this.wave = state.wave;
       this.events.emit('updateWave', this.wave);
     }
@@ -626,41 +624,67 @@ class GameScene extends Phaser.Scene {
     // ── Enemigos remotos ──────────────────────────────────────────────────
     if (state.enemies && this.formation) {
       var children = this.formation.enemies.getChildren();
-      var count    = state.enemies.length;
+      var localById = {};
       for (var i = 0; i < children.length; i++) {
         var le = children[i];
-        if (i < count) {
-          var se = state.enemies[i];
-          if (!le.active) { le.setActive(true).setVisible(true); }
-          var dex = se.x - le.x;
-          var dey = se.y - le.y;
-          var de  = Math.sqrt(dex * dex + dey * dey);
-          if (de > 40)    le.setPosition(se.x, se.y);
-          else if (de > 1) le.setPosition(le.x + dex * 0.4, le.y + dey * 0.4);
-        } else {
-          if (le.active) { le.setActive(false).setVisible(false); }
-        }
+        if (le && le.netId) localById[le.netId] = le;
       }
-      if (count === 0 && this.waveActive) this.waveActive = false;
+
+      var seen = {};
+      for (var j = 0; j < state.enemies.length; j++) {
+        var se = state.enemies[j];
+        if (!se || !se.id) continue;
+        var target = localById[se.id];
+        if (!target) continue;
+        seen[se.id] = true;
+        if (!target.active) target.setActive(true).setVisible(true);
+
+        var dex = se.x - target.x;
+        var dey = se.y - target.y;
+        var de  = Math.sqrt(dex * dex + dey * dey);
+        if (de > 40)        target.setPosition(se.x, se.y);
+        else if (de > 1)    target.setPosition(target.x + dex * 0.4, target.y + dey * 0.4);
+        else if (de > 0.25) target.setPosition(target.x + dex * 0.6, target.y + dey * 0.6);
+      }
+
+      // Limpiar solo los que desaparecen del snapshot
+      for (var k = 0; k < children.length; k++) {
+        var e2 = children[k];
+        if (!e2 || !e2.netId) continue;
+        if (e2.active && !seen[e2.netId]) e2.setActive(false).setVisible(false);
+      }
+
+      if (state.enemies.length === 0 && this.waveActive) this.waveActive = false;
     }
 
-    // ── Balas remotas (host + enemigas) ───────────────────────────────────
-    if (state.bullets && this._remoteBullets !== undefined) {
-      var activeIds = [];
+    // ── Balas remotas: mapas separados pb / eb por netId (sin thrashing) ──
+    if (state.bullets && this._remotePb) {
+      var seenP = {};
+      var seenE = {};
       for (var b = 0; b < state.bullets.length; b++) {
-        var rb  = state.bullets[b];
-        var spr = this._getRemoteBulletSprite(rb.id);
-        spr.setPosition(rb.x, rb.y);
-        // Tint segun dueno
+        var rb = state.bullets[b];
+        if (!rb || rb.id === undefined || rb.id === null) continue;
         if (rb.owner === 'enemy') {
-          spr.setTexture('bullet_enemy').setTint(0xff4444);
+          seenE[rb.id] = true;
+          var se = this._getRemoteBulletSprite(rb.id, this._remoteEb);
+          se.setPosition(rb.x, rb.y);
+          se.setTexture('bullet_enemy').setTint(0xff4444);
+          se.setVisible(true);
         } else {
-          spr.setTexture('bullet_player').clearTint();
+          seenP[rb.id] = true;
+          var sp = this._getRemoteBulletSprite(rb.id, this._remotePb);
+          sp.setPosition(rb.x, rb.y);
+          sp.setTexture('bullet_player');
+          if (rb.owner === 'player2') sp.setTint(0xff9900);
+          else sp.clearTint();
+          sp.setVisible(true);
         }
-        spr.setVisible(true);
-        activeIds.push(rb.id);
       }
-      this._hideUnusedRemoteBullets(activeIds);
+      this._hideUnusedInBulletMap(this._remotePb, seenP);
+      this._hideUnusedInBulletMap(this._remoteEb, seenE);
+      if (this._guestBulletLogTick++ % 60 === 0) {
+        console.log('[ONLINE] bullet maps updated');
+      }
     }
   }
 
@@ -671,6 +695,10 @@ class GameScene extends Phaser.Scene {
    */
   _applySnapshot(state) {
     if (!state) return;
+
+    if (this.onlineMode && !this.isHost && state.wave !== undefined && state.wave !== this.wave) {
+      this._syncWaveFromHost(state.wave);
+    }
 
     if (state.gameOver && !this.gameOver) {
       var self = this;
@@ -725,6 +753,24 @@ class GameScene extends Phaser.Scene {
         lp2.setPosition(sp2.x, sp2.y);
       }
     }
+  }
+
+  _syncWaveFromHost(hostWave) {
+    if (!hostWave || hostWave < 1) return;
+    if (hostWave === this.wave && this.formation) return;
+    this.wave = hostWave;
+    this.events.emit('announceWave', this.wave);
+    this.events.emit('updateWave',   this.wave);
+
+    if (this.formation) {
+      this.formation.destroy();
+      this.formation = null;
+    }
+    this.waveActive = true;
+    this.formation = new EnemyFormation(this, this.wave, this.enemyBullets);
+    this.formation._guestMode = true;
+    if (this.formation.isBossWave) this.events.emit('announceBoss', this.wave);
+    this._registerCollisions();
   }
 
   _applyGuestInput(input) {

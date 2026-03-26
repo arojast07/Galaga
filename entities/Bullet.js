@@ -12,6 +12,8 @@ class Bullet extends Phaser.Physics.Arcade.Sprite {
     super(scene, x, y, texture);
     // Índice del dueño: 0=P1, 1=P2, -1=enemigo
     this.ownerIndex = -1;
+    // Identificador estable para online (asignado en cada disparo)
+    this.netId = null;
   }
 
   /**
@@ -20,9 +22,11 @@ class Bullet extends Phaser.Physics.Arcade.Sprite {
    * @param {number} y
    * @param {number} velocityY  negativo = sube (jugador), positivo = baja (enemigo)
    * @param {number} [ownerIndex=-1]
+   * @param {string|null} [netId=null]
    */
-  fire(x, y, velocityY, ownerIndex = -1) {
+  fire(x, y, velocityY, ownerIndex = -1, netId = null) {
     this.ownerIndex = ownerIndex;
+    this.netId = netId;
     this.setActive(true).setVisible(true);
     this.setPosition(x, y);
     if (this.body) this.body.reset(x, y);

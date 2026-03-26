@@ -1,4 +1,4 @@
-﻿// Player.js
+// Player.js
 class Player extends Phaser.Physics.Arcade.Sprite {
 
   static getKeyConfig(index) {
@@ -31,6 +31,7 @@ class Player extends Phaser.Physics.Arcade.Sprite {
     this.keyAltLeft = cfg.altLeft ? scene.input.keyboard.addKey(cfg.altLeft) : null;
     this.keyAltRight = cfg.altRight ? scene.input.keyboard.addKey(cfg.altRight) : null;
     this.bullets = scene.physics.add.group({ classType: Bullet, maxSize: 30, runChildUpdate: true });
+    this._shotSeq = 0; // para IDs estables de red
   }
 
   handleUpdate(time, paused) {
@@ -62,7 +63,9 @@ class Player extends Phaser.Physics.Arcade.Sprite {
     var b = this.bullets.get(x, y, 'bullet_player');
     if (!b) return;
     b.setDepth(5);
-    b.fire(x, y, this.furyActive ? -680 : -520, this.playerIndex);
+    // ID estable para sincronizacion online (debe regenerarse en cada disparo: el sprite se reutiliza del pool)
+    var netId = 'p' + this.playerIndex + '_' + Math.floor(this.scene.time.now) + '_' + (this._shotSeq++);
+    b.fire(x, y, this.furyActive ? -680 : -520, this.playerIndex, netId);
     if (this.furyActive) b.setTint(0xff6600); else b.clearTint();
   }
 

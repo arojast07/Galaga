@@ -38,6 +38,9 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
 
     // Referencia al grupo de balas enemigas (asignada por EnemyFormation)
     this.enemyBullets = null;
+    // IDs estables para online (asignados por EnemyFormation)
+    this.netId = null;
+    this._shotSeq = 0;
 
     // Barra de vida solo para miniboss
     this.hpBar = null;
@@ -128,7 +131,8 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
     const b = this.enemyBullets.get(this.x, this.y + 16, 'bullet_enemy');
     if (!b) return;
     b.setDepth(4);
-    b.fire(this.x, this.y + 16, 280 + this.wave * 15, -1);
+    const bid = (this.netId ? this.netId : ('enemy_w' + this.wave)) + '_b' + (this._shotSeq++);
+    b.fire(this.x, this.y + 16, 280 + this.wave * 15, -1, bid);
     this._playSfxEnemyShoot();
   }
 

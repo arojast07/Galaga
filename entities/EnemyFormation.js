@@ -41,6 +41,8 @@ class EnemyFormation {
       boss.formationX   = w / 2;
       boss.formationY   = 120;
       boss.enemyBullets = this.enemyBullets;
+      boss.netId        = 'boss_w' + wave;
+      boss._shotSeq     = 0;
       this.enemies.add(boss);
       return;
     }
@@ -66,6 +68,9 @@ class EnemyFormation {
         enemy.formationX   = fx;
         enemy.formationY   = row.y;
         enemy.enemyBullets = this.enemyBullets;
+        // ID deterministico (no depende de runtime): estable entre host/guest para la misma wave/formation.
+        enemy.netId        = 'e_w' + wave + '_r' + r + '_c' + i + '_' + row.type;
+        enemy._shotSeq     = 0;
         this.enemies.add(enemy);
       }
     }
