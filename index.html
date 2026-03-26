@@ -1,0 +1,45 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STELLAR ASSAULT</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <link rel="stylesheet" href="style.css?v=8" />
+</head>
+<body>
+  <div id="game-container"></div>
+
+  <!-- Supabase JS v2 desde CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
+  <!-- Phaser 3 -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+
+  <!-- Online services (antes que las escenas) -->
+  <script src="online/supabaseClient.js?v=8"></script>
+  <script src="online/roomService.js?v=8"></script>
+  <script src="online/scoreService.js?v=8"></script>
+  <script src="online/onlineSync.js?v=8"></script>
+
+  <!-- Entidades -->
+  <script src="entities/Bullet.js?v=8"></script>
+  <script src="entities/PowerUp.js?v=8"></script>
+  <script src="entities/Player.js?v=8"></script>
+  <script src="entities/Enemy.js?v=8"></script>
+  <script src="entities/EnemyFormation.js?v=8"></script>
+
+  <!-- Escenas -->
+  <script src="scenes/BootScene.js?v=8"></script>
+  <script src="scenes/MenuScene.js?v=8"></script>
+  <script src="scenes/LobbyScene.js?v=8"></script>
+  <script src="scenes/GameScene.js?v=8"></script>
+  <script src="scenes/UIScene.js?v=8"></script>
+  <script src="scenes/GameOverScene.js?v=8"></script>
+
+  <!-- Punto de entrada -->
+  <script src="main.js?v=8"></script>
+</body>
+</html>

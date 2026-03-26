@@ -1,0 +1,32 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #000010;
+  overflow: hidden;
+  font-family: 'Courier New', monospace;
+}
+
+/*
+  El canvas de Phaser se posiciona absolutamente dentro del body.
+  Phaser Scale Manager con CENTER_BOTH lo centra solo.
+  No usamos flexbox en body para evitar que el contenedor
+  empuje el canvas fuera del centro.
+*/
+#game-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#game-container canvas {
+  display: block;
+  box-shadow: 0 0 40px rgba(0, 200, 255, 0.3), 0 0 80px rgba(0, 100, 200, 0.15);
+}
