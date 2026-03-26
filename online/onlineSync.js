@@ -2,13 +2,10 @@
  * onlineSync.js
  * Sincronizacion host-authoritative via Supabase Realtime Broadcast.
  *
- * GUEST usa snapshot buffer + interpolacion temporal:
- *   - Guarda los ultimos N snapshots con timestamp
- *   - Renderiza con RENDER_DELAY ms de retraso
- *   - Interpola entre snapshot A y B segun tiempo de render
- *   - Resultado: movimiento continuo sin saltos aunque lleguen 20 paquetes/s
+ * GUEST: snapshot buffer + interpolacion temporal para todas las entidades.
+ * HOST: 30 snapshots/s con jugadores, enemigos Y balas.
  *
- * HOST envia 20 snapshots/s con velocidades (vx/vy) para mejor extrapolacion.
+ * Render delay: 100ms — permite interpolar entre 2-3 snapshots consecutivos.
  */
 
 var OnlineSync = (function() {
@@ -19,16 +16,14 @@ var OnlineSync = (function() {
   var _snapshotCb = null;
   var _inputCb    = null;
 
-  // ── Snapshot buffer (solo guest) ───────────────────────────────────────
-  var RENDER_DELAY    = 100;   // ms — equilibrio fluidez/latencia percibida
-  var BUFFER_MAX      = 24;    // buffer mas grande para 25/s
-  var _snapshotBuffer = [];
+  var RENDER_DELAY      = 100;
+  var BUFFER_MAX        = 32;
+  var SNAPSHOT_INTERVAL = 33;   // ~30/s
+  var INPUT_INTERVAL    = 50;   // 20/s max
 
-  // ── Throttle ───────────────────────────────────────────────────────────
-  var SNAPSHOT_INTERVAL = 40;  // 25/s — mas puntos de interpolacion
-  var INPUT_INTERVAL    = 50;  // 20/s maximo para inputs
-  var _lastSnapshot     = 0;
-  var _lastInput        = 0;
+  var _snapshotBuffer = [];
+  var _lastSnapshot   = 0;
+  var _lastInput      = 0;
   var _prevLeft  = false;
   var _prevRight = false;
   var _prevFire  = false;
@@ -47,7 +42,7 @@ var OnlineSync = (function() {
 
     console.log('[ONLINE] sync initialized. slot:', slot);
     console.log('[ONLINE] render delay ms:', RENDER_DELAY);
-    console.log('[ONLINE] snapshot rate host: 25/s');
+    console.log('[ONLINE] snapshot rate host: 30/s');
 
     _channel = _db
       .channel('game_' + roomId, {
@@ -55,20 +50,17 @@ var OnlineSync = (function() {
       })
       .on('broadcast', { event: 'snapshot' }, function(msg) {
         if (!msg.payload) return;
-        // Usar timestamp del host si existe, sino timestamp de llegada
-        // El timestamp del host es mas preciso para interpolacion temporal
         var t = (msg.payload.t && typeof msg.payload.t === 'number')
-          ? msg.payload.t
-          : Date.now();
-        var entry = { t: t, state: msg.payload };
-        _snapshotBuffer.push(entry);
-        // Mantener buffer ordenado por tiempo (por si llegan desordenados)
-        if (_snapshotBuffer.length > 1 && _snapshotBuffer[_snapshotBuffer.length - 1].t < _snapshotBuffer[_snapshotBuffer.length - 2].t) {
-          _snapshotBuffer.sort(function(a, b) { return a.t - b.t; });
+          ? msg.payload.t : Date.now();
+        _snapshotBuffer.push({ t: t, state: msg.payload });
+        if (_snapshotBuffer.length > 1) {
+          var last = _snapshotBuffer[_snapshotBuffer.length - 1];
+          var prev = _snapshotBuffer[_snapshotBuffer.length - 2];
+          if (last.t < prev.t) {
+            _snapshotBuffer.sort(function(a, b) { return a.t - b.t; });
+          }
         }
-        if (_snapshotBuffer.length > BUFFER_MAX) {
-          _snapshotBuffer.shift();
-        }
+        if (_snapshotBuffer.length > BUFFER_MAX) _snapshotBuffer.shift();
         if (_snapshotCb) _snapshotCb(msg.payload);
       })
       .on('broadcast', { event: 'input' }, function(msg) {
@@ -76,32 +68,20 @@ var OnlineSync = (function() {
       })
       .subscribe(function(status) {
         console.log('[ONLINE] channel subscribed:', status);
-        if (status === 'CHANNEL_ERROR') {
-          console.warn('[ONLINE] fallback detected');
-        }
+        if (status === 'CHANNEL_ERROR') console.warn('[ONLINE] fallback detected');
       });
   }
 
-  // ── Snapshot buffer: obtener estado interpolado para el tiempo de render ──
+  // ── Interpolacion temporal ─────────────────────────────────────────────
 
-  /**
-   * Devuelve el estado interpolado para el tiempo (ahora - RENDER_DELAY).
-   * Busca dos snapshots A y B tal que A.t <= renderTime <= B.t
-   * y devuelve la interpolacion lineal entre ellos.
-   * Si no hay suficientes snapshots, devuelve el mas reciente disponible.
-   *
-   * @returns {object|null}  estado interpolado o null si no hay datos
-   */
   function getInterpolatedState() {
     if (_snapshotBuffer.length === 0) return null;
 
     var renderTime = Date.now() - RENDER_DELAY;
     var last = _snapshotBuffer[_snapshotBuffer.length - 1];
 
-    // Si solo hay un snapshot, devolverlo directamente
     if (_snapshotBuffer.length === 1) return last.state;
 
-    // Buscar par A, B que rodee renderTime
     var a = null, b = null;
     for (var i = 0; i < _snapshotBuffer.length - 1; i++) {
       if (_snapshotBuffer[i].t <= renderTime && _snapshotBuffer[i + 1].t >= renderTime) {
@@ -111,32 +91,28 @@ var OnlineSync = (function() {
       }
     }
 
-    // renderTime antes del primer snapshot: usar el primero
-    if (!a && _snapshotBuffer[0].t > renderTime) {
-      return _snapshotBuffer[0].state;
-    }
+    if (!a && _snapshotBuffer[0].t > renderTime) return _snapshotBuffer[0].state;
 
-    // renderTime despues del ultimo snapshot: extrapolacion corta (max 80ms)
     if (!a) {
+      // Extrapolacion corta (max 80ms) usando los dos ultimos snapshots
       var prev = _snapshotBuffer[_snapshotBuffer.length - 2];
       var span = last.t - prev.t;
       if (span > 0 && span < 200) {
         var overrun = renderTime - last.t;
-        // Solo extrapolar si el overrun es razonable (< 80ms)
         if (overrun > 0 && overrun < 80) {
-          var extraAlpha = overrun / span;
-          return _interpolateStates(prev.state, last.state, 1 + extraAlpha);
+          return _interpolateStates(prev.state, last.state, 1 + overrun / span);
         }
       }
       return last.state;
     }
 
-    // Interpolacion normal entre A y B
     var spanAB = b.t - a.t;
     var alpha  = spanAB > 0 ? (renderTime - a.t) / spanAB : 1;
-    alpha = Math.max(0, Math.min(1, alpha));
+    alpha = Math.max(0, Math.min(1.2, alpha)); // permitir leve extrapolacion
     return _interpolateStates(a.state, b.state, alpha);
   }
+
+  function _lerp(a, b, t) { return a + (b - a) * t; }
 
   function _interpolateStates(sa, sb, alpha) {
     var result = {
@@ -145,10 +121,14 @@ var OnlineSync = (function() {
       gameOver: sb.gameOver,
       players:  [],
       enemies:  [],
+      bullets:  [],
     };
 
-    // Interpolar jugadores
-    var maxP = Math.max(sa.players ? sa.players.length : 0, sb.players ? sb.players.length : 0);
+    // Jugadores
+    var maxP = Math.max(
+      sa.players ? sa.players.length : 0,
+      sb.players ? sb.players.length : 0
+    );
     for (var i = 0; i < maxP; i++) {
       var pa = sa.players && sa.players[i];
       var pb = sb.players && sb.players[i];
@@ -165,8 +145,11 @@ var OnlineSync = (function() {
       });
     }
 
-    // Interpolar enemigos
-    var maxE = Math.max(sa.enemies ? sa.enemies.length : 0, sb.enemies ? sb.enemies.length : 0);
+    // Enemigos — interpolados por indice (orden estable en formacion)
+    var maxE = Math.max(
+      sa.enemies ? sa.enemies.length : 0,
+      sb.enemies ? sb.enemies.length : 0
+    );
     for (var j = 0; j < maxE; j++) {
       var ea = sa.enemies && sa.enemies[j];
       var eb = sb.enemies && sb.enemies[j];
@@ -174,18 +157,55 @@ var OnlineSync = (function() {
       if (!ea) { result.enemies.push(eb); continue; }
       if (!eb) { result.enemies.push(ea); continue; }
       result.enemies.push({
-        x:    _lerp(ea.x, eb.x, alpha),
-        y:    _lerp(ea.y, eb.y, alpha),
-        hp:   eb.hp,
-        type: eb.type,
+        x:      _lerp(ea.x, eb.x, alpha),
+        y:      _lerp(ea.y, eb.y, alpha),
+        hp:     eb.hp,
+        type:   eb.type,
+        active: eb.active,
       });
     }
 
-    return result;
-  }
+    // Balas — interpoladas por id estable
+    // Construir mapa de balas de B para busqueda rapida
+    var bBulletMap = {};
+    if (sb.bullets) {
+      for (var k = 0; k < sb.bullets.length; k++) {
+        bBulletMap[sb.bullets[k].id] = sb.bullets[k];
+      }
+    }
+    if (sa.bullets) {
+      for (var m = 0; m < sa.bullets.length; m++) {
+        var ba = sa.bullets[m];
+        var bb = bBulletMap[ba.id];
+        if (bb) {
+          // Bala presente en ambos snapshots: interpolar
+          result.bullets.push({
+            id:    ba.id,
+            x:     _lerp(ba.x, bb.x, alpha),
+            y:     _lerp(ba.y, bb.y, alpha),
+            owner: bb.owner,
+          });
+          delete bBulletMap[ba.id];
+        } else {
+          // Bala solo en A: extrapolacion corta con velocidad
+          if (ba.vx !== undefined && ba.vy !== undefined) {
+            var dt = (b ? (b.t - a.t) : 50) * alpha / 1000;
+            result.bullets.push({
+              id:    ba.id,
+              x:     ba.x + ba.vx * dt,
+              y:     ba.y + ba.vy * dt,
+              owner: ba.owner,
+            });
+          }
+        }
+      }
+    }
+    // Balas nuevas en B que no estaban en A
+    for (var id in bBulletMap) {
+      result.bullets.push(bBulletMap[id]);
+    }
 
-  function _lerp(a, b, t) {
-    return a + (b - a) * t;
+    return result;
   }
 
   // ── Publicar snapshot (HOST) ───────────────────────────────────────────
@@ -195,7 +215,7 @@ var OnlineSync = (function() {
     var now = Date.now();
     if (now - _lastSnapshot < SNAPSHOT_INTERVAL) return;
     _lastSnapshot = now;
-    state.t = now;  // timestamp para interpolacion
+    state.t = now;
     try {
       _channel.send({ type: 'broadcast', event: 'snapshot', payload: state });
     } catch (e) {
@@ -231,12 +251,12 @@ var OnlineSync = (function() {
   }
 
   return {
-    init:                  init,
-    publishSnapshot:       publishSnapshot,
-    sendInput:             sendInput,
-    onSnapshot:            onSnapshot,
-    onInput:               onInput,
-    getInterpolatedState:  getInterpolatedState,
-    destroy:               destroy,
+    init:                 init,
+    publishSnapshot:      publishSnapshot,
+    sendInput:            sendInput,
+    onSnapshot:           onSnapshot,
+    onInput:              onInput,
+    getInterpolatedState: getInterpolatedState,
+    destroy:              destroy,
   };
 })();

@@ -88,12 +88,12 @@ class GameScene extends Phaser.Scene {
       OnlineSync.init(this.roomId, this.playerSlot, this);
 
       if (this.isHost) {
-        // HOST: recibe inputs del guest para mover players[1]
         console.log('[ONLINE] host input enabled: true');
         OnlineSync.onInput(function(input) { self._applyGuestInput(input); });
       } else {
-        // GUEST: recibe snapshots del host para sincronizar estado
         console.log('[ONLINE] guest mode: recibiendo snapshots');
+        // Inicializar pool de sprites remotos para balas
+        self._initRemoteBulletPool();
         OnlineSync.onSnapshot(function(state) { self._applySnapshot(state); });
       }
     }
@@ -474,13 +474,48 @@ class GameScene extends Phaser.Scene {
 
     var enemiesState = [];
     if (this.formation) {
-      this.formation.enemies.getChildren().forEach(function(e) {
+      this.formation.enemies.getChildren().forEach(function(e, idx) {
         if (e.active) {
           enemiesState.push({
-            x:    Math.round(e.x),
-            y:    Math.round(e.y),
-            hp:   e.hp,
-            type: e.enemyType,
+            id:     idx,
+            x:      Math.round(e.x),
+            y:      Math.round(e.y),
+            hp:     e.hp,
+            type:   e.enemyType,
+            active: true,
+          });
+        }
+      });
+    }
+
+    // Incluir balas del host (player1) y balas enemigas para el guest
+    var bulletsState = [];
+    // Balas del jugador host (player1)
+    if (this.players[0] && this.players[0].bullets) {
+      this.players[0].bullets.getChildren().forEach(function(b) {
+        if (b.active) {
+          bulletsState.push({
+            id:    'p1_' + Math.round(b.x) + '_' + Math.round(b.y),
+            x:     Math.round(b.x),
+            y:     Math.round(b.y),
+            vx:    0,
+            vy:    -520,
+            owner: 'player1',
+          });
+        }
+      });
+    }
+    // Balas enemigas
+    if (this.enemyBullets) {
+      this.enemyBullets.getChildren().forEach(function(b, idx) {
+        if (b.active) {
+          bulletsState.push({
+            id:    'eb_' + idx,
+            x:     Math.round(b.x),
+            y:     Math.round(b.y),
+            vx:    0,
+            vy:    300,
+            owner: 'enemy',
           });
         }
       });
@@ -489,6 +524,7 @@ class GameScene extends Phaser.Scene {
     OnlineSync.publishSnapshot({
       players:  playersState,
       enemies:  enemiesState,
+      bullets:  bulletsState,
       wave:     this.wave,
       score:    this.score,
       gameOver: this.gameOver,
@@ -505,10 +541,45 @@ class GameScene extends Phaser.Scene {
   }
 
   /**
-   * GUEST: aplica el estado interpolado temporalmente cada frame.
-   * Usa el buffer de snapshots para interpolar posiciones de entidades remotas.
-   * La logica de autoridad (vidas, muerte) se maneja en _applySnapshot.
+   * GUEST: inicializa el pool de sprites remotos para balas del host.
+   * Se llama una vez al crear la escena en modo guest.
    */
+  _initRemoteBulletPool() {
+    this._remoteBullets = {};  // id -> Phaser.GameObjects.Image
+    this._remoteBulletPool = [];
+    // Pre-crear 40 sprites de bala para reutilizar
+    for (var i = 0; i < 40; i++) {
+      var spr = this.add.image(-100, -100, 'bullet_player')
+        .setDepth(5).setVisible(false).setAlpha(0.85);
+      this._remoteBulletPool.push(spr);
+    }
+    this._remoteBulletPoolIdx = 0;
+    console.log('[ONLINE] guest interpolation active');
+  }
+
+  _getRemoteBulletSprite(id) {
+    if (this._remoteBullets[id]) return this._remoteBullets[id];
+    // Reutilizar del pool circular
+    var spr = this._remoteBulletPool[this._remoteBulletPoolIdx % this._remoteBulletPool.length];
+    this._remoteBulletPoolIdx++;
+    // Liberar id anterior si este sprite estaba asignado
+    for (var k in this._remoteBullets) {
+      if (this._remoteBullets[k] === spr) { delete this._remoteBullets[k]; break; }
+    }
+    spr.setVisible(true);
+    this._remoteBullets[id] = spr;
+    return spr;
+  }
+
+  _hideUnusedRemoteBullets(activeIds) {
+    for (var id in this._remoteBullets) {
+      if (activeIds.indexOf(id) === -1) {
+        this._remoteBullets[id].setVisible(false).setPosition(-100, -100);
+        delete this._remoteBullets[id];
+      }
+    }
+  }
+
   _applyInterpolatedState() {
     var state = OnlineSync.getInterpolatedState();
     if (!state) return;
@@ -522,18 +593,15 @@ class GameScene extends Phaser.Scene {
       this.events.emit('updateWave', this.wave);
     }
 
-    // Interpolar player1 remoto (nave del host)
+    // ── Player1 remoto ────────────────────────────────────────────────────
     if (state.players && state.players[0] && this.players[0]) {
       var sp1 = state.players[0];
       var lp1 = this.players[0];
       if (!sp1.isDead) {
-        // La interpolacion temporal ya da la posicion correcta — aplicar directo
-        // Smoothing extra solo si el delta residual es muy pequeno (< 3px)
         var dx1 = sp1.x - lp1.x;
         var dy1 = sp1.y - lp1.y;
         var d1  = Math.sqrt(dx1 * dx1 + dy1 * dy1);
         if (d1 < 3) {
-          // Delta minimo: suavizado extra para eliminar micro-jitter
           lp1.setPosition(lp1.x + dx1 * 0.5, lp1.y + dy1 * 0.5);
         } else {
           lp1.setPosition(sp1.x, sp1.y);
@@ -541,7 +609,7 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    // Interpolar player2 (reconciliacion suave con autoridad del host)
+    // ── Player2 reconciliacion ────────────────────────────────────────────
     if (state.players && state.players[1] && this.players[1]) {
       var sp2 = state.players[1];
       var lp2 = this.players[1];
@@ -549,21 +617,13 @@ class GameScene extends Phaser.Scene {
         var dx2  = sp2.x - lp2.x;
         var dy2  = sp2.y - lp2.y;
         var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-        if (dist > 50) {
-          // Divergencia grande: correccion directa
-          lp2.setPosition(sp2.x, sp2.y);
-        } else if (dist > 3) {
-          // Divergencia media: reconciliacion suave
-          lp2.setPosition(lp2.x + dx2 * 0.25, lp2.y + dy2 * 0.25);
-        } else if (dist > 0.5) {
-          // Delta minimo: smoothing extra anti-jitter
-          lp2.setPosition(lp2.x + dx2 * 0.5, lp2.y + dy2 * 0.5);
-        }
-        // Si dist <= 0.5 no mover — evitar micro-oscilaciones
+        if (dist > 50)       lp2.setPosition(sp2.x, sp2.y);
+        else if (dist > 3)   lp2.setPosition(lp2.x + dx2 * 0.25, lp2.y + dy2 * 0.25);
+        else if (dist > 0.5) lp2.setPosition(lp2.x + dx2 * 0.5,  lp2.y + dy2 * 0.5);
       }
     }
 
-    // Interpolar enemigos remotos
+    // ── Enemigos remotos ──────────────────────────────────────────────────
     if (state.enemies && this.formation) {
       var children = this.formation.enemies.getChildren();
       var count    = state.enemies.length;
@@ -572,22 +632,35 @@ class GameScene extends Phaser.Scene {
         if (i < count) {
           var se = state.enemies[i];
           if (!le.active) { le.setActive(true).setVisible(true); }
-          // Aplicar posicion interpolada directamente (ya viene suavizada del buffer)
           var dex = se.x - le.x;
           var dey = se.y - le.y;
           var de  = Math.sqrt(dex * dex + dey * dey);
-          if (de > 40) {
-            le.setPosition(se.x, se.y);
-          } else if (de > 1) {
-            le.setPosition(le.x + dex * 0.4, le.y + dey * 0.4);
-          }
+          if (de > 40)    le.setPosition(se.x, se.y);
+          else if (de > 1) le.setPosition(le.x + dex * 0.4, le.y + dey * 0.4);
         } else {
           if (le.active) { le.setActive(false).setVisible(false); }
         }
       }
-      if (count === 0 && this.waveActive) {
-        this.waveActive = false;
+      if (count === 0 && this.waveActive) this.waveActive = false;
+    }
+
+    // ── Balas remotas (host + enemigas) ───────────────────────────────────
+    if (state.bullets && this._remoteBullets !== undefined) {
+      var activeIds = [];
+      for (var b = 0; b < state.bullets.length; b++) {
+        var rb  = state.bullets[b];
+        var spr = this._getRemoteBulletSprite(rb.id);
+        spr.setPosition(rb.x, rb.y);
+        // Tint segun dueno
+        if (rb.owner === 'enemy') {
+          spr.setTexture('bullet_enemy').setTint(0xff4444);
+        } else {
+          spr.setTexture('bullet_player').clearTint();
+        }
+        spr.setVisible(true);
+        activeIds.push(rb.id);
       }
+      this._hideUnusedRemoteBullets(activeIds);
     }
   }
 
