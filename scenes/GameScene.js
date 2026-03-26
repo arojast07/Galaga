@@ -446,14 +446,14 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    // Modo online: host publica snapshot, guest envia inputs
+    // Modo online: host publica snapshot, guest interpola estado remoto
     if (this.onlineMode && this.roomId) {
       if (this.isHost) {
-        // Host publica estado para el guest
         this._publishOnlineSnapshot();
       } else {
-        // Guest envia sus inputs al host
+        // Guest: enviar inputs y aplicar interpolacion temporal cada frame
         this._sendGuestInput(time);
+        this._applyInterpolatedState();
       }
     }
   }
@@ -476,7 +476,12 @@ class GameScene extends Phaser.Scene {
     if (this.formation) {
       this.formation.enemies.getChildren().forEach(function(e) {
         if (e.active) {
-          enemiesState.push({ x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, type: e.enemyType });
+          enemiesState.push({
+            x:    Math.round(e.x),
+            y:    Math.round(e.y),
+            hp:   e.hp,
+            type: e.enemyType,
+          });
         }
       });
     }
@@ -493,19 +498,22 @@ class GameScene extends Phaser.Scene {
   _sendGuestInput(time) {
     var p2 = this.players[1] || this.players[0];
     if (!p2 || p2.isDead || p2._isRemote) return;
-
     var left  = p2.keyLeft  ? p2.keyLeft.isDown  : false;
     var right = p2.keyRight ? p2.keyRight.isDown : false;
     var fire  = p2.keyFire  ? p2.keyFire.isDown  : false;
-
-    // onlineSync maneja throttle y deteccion de cambio internamente
     OnlineSync.sendInput(left, right, fire);
   }
 
-  _applySnapshot(state) {
+  /**
+   * GUEST: aplica el estado interpolado temporalmente cada frame.
+   * Usa el buffer de snapshots para interpolar posiciones de entidades remotas.
+   * La logica de autoridad (vidas, muerte) se maneja en _applySnapshot.
+   */
+  _applyInterpolatedState() {
+    var state = OnlineSync.getInterpolatedState();
     if (!state) return;
 
-    if (state.score !== undefined) {
+    if (state.score !== undefined && state.score !== this.score) {
       this.score = state.score;
       this.events.emit('updateScore', this.score);
     }
@@ -514,9 +522,84 @@ class GameScene extends Phaser.Scene {
       this.events.emit('updateWave', this.wave);
     }
 
-    // gameOver: no llamar _triggerGameOver directamente — usar delay para evitar congelamiento
+    // Interpolar player1 remoto (nave del host)
+    if (state.players && state.players[0] && this.players[0]) {
+      var sp1 = state.players[0];
+      var lp1 = this.players[0];
+      if (!sp1.isDead) {
+        // La interpolacion temporal ya da la posicion correcta — aplicar directo
+        // Smoothing extra solo si el delta residual es muy pequeno (< 3px)
+        var dx1 = sp1.x - lp1.x;
+        var dy1 = sp1.y - lp1.y;
+        var d1  = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+        if (d1 < 3) {
+          // Delta minimo: suavizado extra para eliminar micro-jitter
+          lp1.setPosition(lp1.x + dx1 * 0.5, lp1.y + dy1 * 0.5);
+        } else {
+          lp1.setPosition(sp1.x, sp1.y);
+        }
+      }
+    }
+
+    // Interpolar player2 (reconciliacion suave con autoridad del host)
+    if (state.players && state.players[1] && this.players[1]) {
+      var sp2 = state.players[1];
+      var lp2 = this.players[1];
+      if (!sp2.isDead && !lp2.isDead) {
+        var dx2  = sp2.x - lp2.x;
+        var dy2  = sp2.y - lp2.y;
+        var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+        if (dist > 50) {
+          // Divergencia grande: correccion directa
+          lp2.setPosition(sp2.x, sp2.y);
+        } else if (dist > 3) {
+          // Divergencia media: reconciliacion suave
+          lp2.setPosition(lp2.x + dx2 * 0.25, lp2.y + dy2 * 0.25);
+        } else if (dist > 0.5) {
+          // Delta minimo: smoothing extra anti-jitter
+          lp2.setPosition(lp2.x + dx2 * 0.5, lp2.y + dy2 * 0.5);
+        }
+        // Si dist <= 0.5 no mover — evitar micro-oscilaciones
+      }
+    }
+
+    // Interpolar enemigos remotos
+    if (state.enemies && this.formation) {
+      var children = this.formation.enemies.getChildren();
+      var count    = state.enemies.length;
+      for (var i = 0; i < children.length; i++) {
+        var le = children[i];
+        if (i < count) {
+          var se = state.enemies[i];
+          if (!le.active) { le.setActive(true).setVisible(true); }
+          // Aplicar posicion interpolada directamente (ya viene suavizada del buffer)
+          var dex = se.x - le.x;
+          var dey = se.y - le.y;
+          var de  = Math.sqrt(dex * dex + dey * dey);
+          if (de > 40) {
+            le.setPosition(se.x, se.y);
+          } else if (de > 1) {
+            le.setPosition(le.x + dex * 0.4, le.y + dey * 0.4);
+          }
+        } else {
+          if (le.active) { le.setActive(false).setVisible(false); }
+        }
+      }
+      if (count === 0 && this.waveActive) {
+        this.waveActive = false;
+      }
+    }
+  }
+
+  /**
+   * GUEST: callback de snapshot autoritativo.
+   * Solo maneja logica de estado (vidas, muerte, gameOver).
+   * Las posiciones se manejan en _applyInterpolatedState cada frame.
+   */
+  _applySnapshot(state) {
+    if (!state) return;
+
     if (state.gameOver && !this.gameOver) {
-      console.log('[ONLINE] gameOver recibido del host, iniciando cierre en guest...');
       var self = this;
       this.time.delayedCall(800, function() {
         if (!self.gameOver) self._triggerGameOver();
@@ -524,48 +607,30 @@ class GameScene extends Phaser.Scene {
       return;
     }
 
-    // Reconciliar player1 (nave del host, remota en el guest)
+    // Sincronizar muerte de player1 remoto
     if (state.players && state.players[0] && this.players[0]) {
       var sp1 = state.players[0];
       var lp1 = this.players[0];
-      var dx1 = sp1.x - lp1.x;
-      var dy1 = sp1.y - lp1.y;
-      var dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-      // Interpolacion suave si delta < 80px, correccion directa si es mayor
-      if (dist1 > 80) {
-        lp1.setPosition(sp1.x, sp1.y);
-      } else if (dist1 > 4) {
-        lp1.setPosition(lp1.x + dx1 * 0.4, lp1.y + dy1 * 0.4);
-      }
       if (sp1.isDead && !lp1.isDead) {
         lp1.isDead = true;
         lp1.setVisible(false);
       }
+      if (!sp1.isDead && lp1.isDead) {
+        lp1.isDead = false;
+        lp1.setVisible(true).setAlpha(1);
+      }
     }
 
-    // Reconciliar player2 (nave del guest — host es autoritativo)
+    // Sincronizar estado autoritativo de player2
     if (state.players && state.players[1] && this.players[1]) {
       var sp2 = state.players[1];
       var lp2 = this.players[1];
 
-      var dx2   = sp2.x - lp2.x;
-      var dy2   = sp2.y - lp2.y;
-      var dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-
-      // Correccion suave: interpolar si delta < 60px, directo si es mayor
-      if (dist2 > 60) {
-        lp2.setPosition(sp2.x, sp2.y);
-      } else if (dist2 > 5) {
-        lp2.setPosition(lp2.x + dx2 * 0.3, lp2.y + dy2 * 0.3);
-      }
-
-      // Sincronizar vidas desde host (sin log por frame)
       if (sp2.lives !== undefined && sp2.lives !== lp2.lives) {
         lp2.lives = sp2.lives;
         this.events.emit('updateLivesP', 1, lp2.lives);
       }
 
-      // Sincronizar muerte desde host
       if (sp2.isDead && !lp2.isDead) {
         console.log('[ONLINE] player2 death received from host');
         lp2.isDead = true;
@@ -574,42 +639,19 @@ class GameScene extends Phaser.Scene {
         this._spawnExplosion(lp2.x, lp2.y, 0x00ccff);
         var allDead = this.players.every(function(p) { return p.isDead; });
         if (allDead) {
-          var self2 = this;
+          var self3 = this;
           this.time.delayedCall(1200, function() {
-            if (!self2.gameOver) self2._triggerGameOver();
+            if (!self3.gameOver) self3._triggerGameOver();
           });
         }
       }
 
-      // Reconciliar reaparicion
       if (!sp2.isDead && lp2.isDead && sp2.lives > 0) {
         lp2.isDead = false;
         lp2.setVisible(true).setAlpha(1);
         lp2.setPosition(sp2.x, sp2.y);
       }
     }
-
-    // Actualizar posiciones de enemigos desde snapshot del host
-    if (state.enemies && this.formation) {
-      var enemyChildren = this.formation.enemies.getChildren();
-      var activeCount = state.enemies.length;
-      for (var i = 0; i < enemyChildren.length; i++) {
-        var le = enemyChildren[i];
-        if (i < activeCount) {
-          var se = state.enemies[i];
-          if (!le.active) { le.setActive(true).setVisible(true); }
-          le.setPosition(se.x, se.y);
-        } else {
-          if (le.active) { le.setActive(false).setVisible(false); }
-        }
-      }
-      // Si el host no tiene enemigos activos, marcar oleada como vacia
-      if (activeCount === 0 && this.waveActive) {
-        this.waveActive = false;
-      }
-    }
-
-    console.log('[ONLINE] snapshot applied');
   }
 
   _applyGuestInput(input) {
