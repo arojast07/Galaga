@@ -2,128 +2,123 @@
  * onlineSync.js
  * Sincronizacion host-authoritative entre dos jugadores online.
  *
- * Arquitectura:
- *   HOST  -> corre el juego completo (GameScene normal)
- *         -> publica snapshots de estado cada ~100ms en game_state
- *         -> recibe inputs del guest via game_inputs
+ * Esta version NO usa game_state ni game_inputs en Supabase.
+ * Usa Supabase Realtime Broadcast (sin tablas) para enviar
+ * snapshots e inputs directamente por websocket.
+ * Esto elimina los 404 de tablas inexistentes y es mas rapido.
  *
- *   GUEST -> recibe snapshots y refleja el estado en pantalla
- *         -> envia sus inputs al host via game_inputs
- *         -> NO corre fisica propia de enemigos
+ * HOST  -> publica snapshots via broadcast cada ~150ms
+ *       -> recibe inputs del guest via broadcast
+ *       -> controla su nave localmente (players[0])
  *
- * Uso desde GameScene:
- *   OnlineSync.init(roomId, slot, scene)
- *   OnlineSync.publishSnapshot(stateObj)   // solo host
- *   OnlineSync.sendInput(inputObj)         // solo guest
- *   OnlineSync.onSnapshot(callback)        // solo guest
- *   OnlineSync.onInput(callback)           // solo host
- *   OnlineSync.destroy()
+ * GUEST -> recibe snapshots del host
+ *       -> envia sus inputs via broadcast
+ *       -> controla su nave localmente (players[1])
  */
 
 var OnlineSync = (function() {
-  var _db       = supabaseClient;
-  var _roomId   = null;
-  var _slot     = null;
-  var _scene    = null;
-  var _channels = [];
+  var _db              = supabaseClient;
+  var _roomId          = null;
+  var _slot            = null;
+  var _channel         = null;
+  var _snapshotCb      = null;
+  var _inputCb         = null;
+  var _syncDisabled    = false;
 
-  // Throttle de publicacion de snapshots (ms)
-  var SNAPSHOT_INTERVAL = 100;
+  var SNAPSHOT_INTERVAL = 150;
   var _lastSnapshot     = 0;
 
   function init(roomId, slot, scene) {
-    _roomId = roomId;
-    _slot   = slot;
-    _scene  = scene;
+    _roomId       = roomId;
+    _slot         = slot;
+    _syncDisabled = false;
+    _snapshotCb   = null;
+    _inputCb      = null;
+
+    console.log('[ONLINE] inicializando sync. slot:', slot, 'roomId:', roomId);
+
+    // Canal broadcast — no requiere tablas, usa websocket puro
+    _channel = _db
+      .channel('game_' + roomId, {
+        config: { broadcast: { self: false } },
+      })
+      .on('broadcast', { event: 'snapshot' }, function(msg) {
+        if (_snapshotCb && msg.payload) {
+          _snapshotCb(msg.payload);
+        }
+      })
+      .on('broadcast', { event: 'input' }, function(msg) {
+        if (_inputCb && msg.payload) {
+          _inputCb(msg.payload);
+        }
+      })
+      .subscribe(function(status) {
+        console.log('[ONLINE] broadcast channel status:', status);
+      });
   }
 
   /**
-   * HOST: publica un snapshot del estado del juego.
-   * Se throttlea a SNAPSHOT_INTERVAL ms para no saturar Supabase.
-   * @param {object} state  { players, enemies, wave, score }
+   * HOST: publica snapshot via broadcast (throttleado).
+   * No usa ninguna tabla de Supabase.
    */
-  async function publishSnapshot(state) {
+  function publishSnapshot(state) {
+    if (_syncDisabled || !_channel || !_roomId) return;
     var now = Date.now();
     if (now - _lastSnapshot < SNAPSHOT_INTERVAL) return;
     _lastSnapshot = now;
 
-    await _db.from('game_state').upsert({
-      room_id:    _roomId,
-      state_json: JSON.stringify(state),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'room_id' });
+    try {
+      _channel.send({
+        type:    'broadcast',
+        event:   'snapshot',
+        payload: state,
+      });
+    } catch (e) {
+      console.warn('[ONLINE] error enviando snapshot:', e.message);
+    }
   }
 
   /**
-   * GUEST: envia sus inputs al host.
-   * @param {object} input  { left, right, fire, slot }
+   * GUEST: envia inputs al host via broadcast.
    */
-  async function sendInput(input) {
-    input.slot      = _slot;
-    input.timestamp = Date.now();
-    await _db.from('game_inputs').upsert({
-      room_id:    _roomId,
-      slot:       _slot,
-      input_json: JSON.stringify(input),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'room_id,slot' });
+  function sendInput(input) {
+    if (_syncDisabled || !_channel || !_roomId) return;
+    try {
+      _channel.send({
+        type:    'broadcast',
+        event:   'input',
+        payload: input,
+      });
+    } catch (e) {
+      console.warn('[ONLINE] error enviando input:', e.message);
+    }
   }
 
   /**
-   * GUEST: suscribe a snapshots del host.
+   * GUEST: registra callback para recibir snapshots del host.
    */
   function onSnapshot(callback) {
-    var ch = _db
-      .channel('snap_' + _roomId)
-      .on('postgres_changes', {
-        event:  '*',
-        schema: 'public',
-        table:  'game_state',
-        filter: 'room_id=eq.' + _roomId,
-      }, function(payload) {
-        if (payload.new && payload.new.state_json) {
-          try {
-            callback(JSON.parse(payload.new.state_json));
-          } catch (e) {}
-        }
-      })
-      .subscribe();
-    _channels.push(ch);
+    _snapshotCb = callback;
   }
 
   /**
-   * HOST: suscribe a inputs del guest.
+   * HOST: registra callback para recibir inputs del guest.
    */
   function onInput(callback) {
-    var ch = _db
-      .channel('input_' + _roomId)
-      .on('postgres_changes', {
-        event:  '*',
-        schema: 'public',
-        table:  'game_inputs',
-        filter: 'room_id=eq.' + _roomId,
-      }, function(payload) {
-        if (payload.new && payload.new.input_json) {
-          try {
-            callback(JSON.parse(payload.new.input_json));
-          } catch (e) {}
-        }
-      })
-      .subscribe();
-    _channels.push(ch);
+    _inputCb = callback;
   }
 
-  /**
-   * Limpia todos los canales al salir.
-   */
   function destroy() {
-    _channels.forEach(function(ch) {
-      _db.removeChannel(ch);
-    });
-    _channels = [];
-    _roomId   = null;
-    _slot     = null;
-    _scene    = null;
+    console.log('[ONLINE] destruyendo sync');
+    if (_channel) {
+      _db.removeChannel(_channel);
+      _channel = null;
+    }
+    _roomId      = null;
+    _slot        = null;
+    _snapshotCb  = null;
+    _inputCb     = null;
+    _syncDisabled = false;
   }
 
   return {

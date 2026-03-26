@@ -92,6 +92,9 @@ class EnemyFormation {
   }
 
   update(time, delta, playerXPositions) {
+    // En modo guest no correr IA local — el host envia snapshots
+    if (this._guestMode) return;
+
     this.formationDx += this.formationDir * this.formationSpd * (delta / 1000);
     if (Math.abs(this.formationDx) > this.formationMax) {
       this.formationDir *= -1;

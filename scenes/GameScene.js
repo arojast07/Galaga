@@ -49,13 +49,22 @@ class GameScene extends Phaser.Scene {
 
     this.powerUps = this.physics.add.group({ runChildUpdate: true });
 
-    // Instanciar jugadores
+    // Instanciar jugadores segun modo
     this.players = [];
     if (this.playerCount >= 2) {
       this.players.push(new Player(this, w / 2 - 50, h - 60, 0, Player.getKeyConfig(0)));
       this.players.push(new Player(this, w / 2 + 50, h - 60, 1, Player.getKeyConfig(1)));
     } else {
       this.players.push(new Player(this, w / 2, h - 60, 0, Player.getKeyConfig(0)));
+    }
+
+    // En modo online el guest no controla players[0] (nave del host)
+    // players[0] = host (A/D/Space), players[1] = guest (Left/Right/Shift)
+    // El guest solo controla players[1] localmente; players[0] se mueve por snapshot
+    if (this.onlineMode && !this.isHost && this.players[0]) {
+      // Deshabilitar input local de la nave del host en el cliente del guest
+      this.players[0]._isRemote = true;
+      console.log('[ONLINE] players[0] marcado como remoto en cliente guest');
     }
 
     // Escuchar eventos de furia para el overlay
@@ -73,13 +82,19 @@ class GameScene extends Phaser.Scene {
 
     // Modo online: configurar sincronizacion
     if (this.onlineMode && this.roomId) {
+      console.log('[ONLINE] host/player role:', this.playerSlot);
+      console.log('[ONLINE] isHost:', this.isHost);
+
       OnlineSync.init(this.roomId, this.playerSlot, this);
-      if (!this.isHost) {
-        // El guest recibe snapshots y los aplica
-        OnlineSync.onSnapshot(function(state) { self._applySnapshot(state); });
-      } else {
-        // El host recibe inputs del guest
+
+      if (this.isHost) {
+        // HOST: recibe inputs del guest para mover players[1]
+        console.log('[ONLINE] host input enabled: true');
         OnlineSync.onInput(function(input) { self._applyGuestInput(input); });
+      } else {
+        // GUEST: recibe snapshots del host para sincronizar estado
+        console.log('[ONLINE] guest mode: recibiendo snapshots');
+        OnlineSync.onSnapshot(function(state) { self._applySnapshot(state); });
       }
     }
 
@@ -88,14 +103,23 @@ class GameScene extends Phaser.Scene {
 
   _startWave() {
     this.waveActive = true;
-    this.formation  = new EnemyFormation(this, this.wave, this.enemyBullets);
+
+    // El guest no corre fisica de enemigos — solo refleja snapshots del host
+    // Aun asi necesita el grupo de enemigos para colisiones visuales
+    this.formation = new EnemyFormation(this, this.wave, this.enemyBullets);
+
+    // En modo guest, desactivar IA de enemigos (no disparan, no se mueven solos)
+    if (this.onlineMode && !this.isHost) {
+      this.formation._guestMode = true;
+      console.log('[ONLINE] formacion en modo guest (sin IA local)');
+    }
+
     this._registerCollisions();
 
     var self = this;
     this.time.delayedCall(0, function() {
       self.events.emit('announceWave', self.wave);
       self.events.emit('updateWave',   self.wave);
-      // Notificar si es oleada de boss
       if (self.formation.isBossWave) {
         self.events.emit('announceBoss', self.wave);
       }
@@ -390,7 +414,10 @@ class GameScene extends Phaser.Scene {
     if (this.paused) return;
 
     for (var i = 0; i < this.players.length; i++) {
-      this.players[i].handleUpdate(time, this.paused);
+      var pl = this.players[i];
+      // En modo online guest: no procesar input de la nave remota (players[0])
+      if (pl._isRemote) continue;
+      pl.handleUpdate(time, this.paused);
     }
 
     if (this.formation && this.waveActive) {
@@ -414,17 +441,20 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    // Modo online: host publica snapshot periodicamente
-    if (this.onlineMode && this.isHost && this.roomId) {
-      this._publishOnlineSnapshot();
+    // Modo online: host publica snapshot, guest envia inputs
+    if (this.onlineMode && this.roomId) {
+      if (this.isHost) {
+        // Host publica estado para el guest
+        this._publishOnlineSnapshot();
+      } else {
+        // Guest envia sus inputs al host
+        this._sendGuestInput(time);
+      }
     }
   }
 
   // ── Sincronizacion online ──────────────────────────────────────────────
 
-  /**
-   * HOST: construye y publica un snapshot del estado actual.
-   */
   _publishOnlineSnapshot() {
     var playersState = this.players.map(function(p) {
       return { x: Math.round(p.x), y: Math.round(p.y), lives: p.lives, isDead: p.isDead };
@@ -434,28 +464,38 @@ class GameScene extends Phaser.Scene {
     if (this.formation) {
       this.formation.enemies.getChildren().forEach(function(e) {
         if (e.active) {
-          enemiesState.push({ x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, type: e.enemyType });
+          enemiesState.push({ x: Math.round(e.x), y: Math.round(e.y), hp: e.hp, type: e.enemyType, active: true });
         }
       });
     }
 
     OnlineSync.publishSnapshot({
-      players:    playersState,
-      enemies:    enemiesState,
-      wave:       this.wave,
-      score:      this.score,
-      gameOver:   this.gameOver,
+      players:  playersState,
+      enemies:  enemiesState,
+      wave:     this.wave,
+      score:    this.score,
+      gameOver: this.gameOver,
     });
+    console.log('[ONLINE] snapshot enviado. jugadores:', playersState.length, 'enemigos:', enemiesState.length);
   }
 
-  /**
-   * GUEST: aplica un snapshot recibido del host.
-   * Solo actualiza posiciones visuales, no corre fisica propia.
-   */
+  _sendGuestInput(time) {
+    var p2 = this.players[1] || this.players[0];
+    if (!p2 || p2.isDead || p2._isRemote) return;
+
+    var inputData = {
+      left:  p2.keyLeft  ? p2.keyLeft.isDown  : false,
+      right: p2.keyRight ? p2.keyRight.isDown : false,
+      fire:  p2.keyFire  ? p2.keyFire.isDown  : false,
+      slot:  'player2',
+    };
+    OnlineSync.sendInput(inputData);
+  }
+
   _applySnapshot(state) {
     if (!state) return;
+    console.log('[ONLINE] snapshot recibido. wave:', state.wave, 'score:', state.score);
 
-    // Actualizar score y oleada
     if (state.score !== undefined) {
       this.score = state.score;
       this.events.emit('updateScore', this.score);
@@ -469,24 +509,44 @@ class GameScene extends Phaser.Scene {
       return;
     }
 
-    // Actualizar posicion del jugador remoto (P1 desde perspectiva del guest)
+    // Actualizar posicion de la nave del host (players[0] es remoto en el guest)
     if (state.players && state.players[0] && this.players[0]) {
-      var remoteP = state.players[0];
-      this.players[0].setPosition(remoteP.x, remoteP.y);
+      this.players[0].setPosition(state.players[0].x, state.players[0].y);
+      if (state.players[0].isDead && !this.players[0].isDead) {
+        this.players[0].isDead = true;
+        this.players[0].setVisible(false);
+      }
+    }
+
+    // Actualizar posiciones de enemigos desde snapshot del host
+    if (state.enemies && this.formation) {
+      var enemyChildren = this.formation.enemies.getChildren();
+      for (var i = 0; i < Math.min(state.enemies.length, enemyChildren.length); i++) {
+        var se = state.enemies[i];
+        var le = enemyChildren[i];
+        if (le && se) {
+          le.setPosition(se.x, se.y);
+          if (!le.active) { le.setActive(true).setVisible(true); }
+        }
+      }
+      // Desactivar enemigos que el host ya mato
+      for (var j = state.enemies.length; j < enemyChildren.length; j++) {
+        if (enemyChildren[j] && enemyChildren[j].active) {
+          enemyChildren[j].setActive(false).setVisible(false);
+        }
+      }
     }
   }
 
-  /**
-   * HOST: aplica inputs recibidos del guest para mover su nave.
-   */
   _applyGuestInput(input) {
     if (!input || !this.players[1]) return;
     var p2 = this.players[1];
     if (p2.isDead) return;
+    console.log('[ONLINE] input recibido del guest. left:', input.left, 'right:', input.right, 'fire:', input.fire);
     var speed = 220;
-    if (input.left)  p2.setVelocityX(-speed);
+    if (input.left)       p2.setVelocityX(-speed);
     else if (input.right) p2.setVelocityX(speed);
-    else p2.setVelocityX(0);
+    else                  p2.setVelocityX(0);
     if (input.fire) {
       var now = this.time.now;
       if (now > p2.lastFired + p2.fireRate) {
