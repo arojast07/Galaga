@@ -52,11 +52,14 @@ var RoomService = (function() {
    * @returns {Promise<{roomCode: string, roomId: string}>}
    */
   async function createRoom(playerName) {
+    console.log('[ROOM] createRoom iniciado');
+    console.log('[ROOM] supabase client existe:', !!db);
     console.log('[ROOM] creando sala para:', playerName);
 
     var code = await generateRoomCode();
     console.log('[ROOM] codigo generado:', code);
 
+    console.log('[ROOM] intentando insert en rooms...');
     var insertRes = await db.from('rooms').insert({
       room_code:  code,
       status:     'waiting',
@@ -64,8 +67,9 @@ var RoomService = (function() {
       guest_name: null,
     }).select('id, room_code').single();
 
+    console.log('[ROOM] resultado insert:', insertRes.error ? 'ERROR' : 'OK');
     if (insertRes.error) {
-      console.error('[ROOM] error al insertar sala:', insertRes.error);
+      console.error('[ROOM] error real Supabase:', JSON.stringify(insertRes.error));
       throw new Error('Error Supabase al crear sala: ' + insertRes.error.message + ' (code: ' + insertRes.error.code + ')');
     }
 
