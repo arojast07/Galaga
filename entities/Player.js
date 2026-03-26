@@ -1,4 +1,4 @@
-// Player.js
+﻿// Player.js - Nave del jugador con modo furia, power-ups y multiplayer
 class Player extends Phaser.Physics.Arcade.Sprite {
 
   static getKeyConfig(index) {

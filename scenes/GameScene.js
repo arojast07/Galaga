@@ -108,6 +108,11 @@ class GameScene extends Phaser.Scene {
     // Aun asi necesita el grupo de enemigos para colisiones visuales
     this.formation = new EnemyFormation(this, this.wave, this.enemyBullets);
 
+    // Asignar netId a enemigos para sincronizacion online
+    this.formation.enemies.getChildren().forEach(function(en, idx) {
+      en.netId = idx;
+    });
+
     // En modo guest, desactivar IA de enemigos (no disparan, no se mueven solos)
     if (this.onlineMode && !this.isHost) {
       this.formation._guestMode = true;
@@ -599,11 +604,17 @@ class GameScene extends Phaser.Scene {
         var dx1 = sp1.x - lp1.x;
         var dy1 = sp1.y - lp1.y;
         var d1  = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+        var nx1, ny1;
         if (d1 < 3) {
-          lp1.setPosition(lp1.x + dx1 * 0.5, lp1.y + dy1 * 0.5);
+          nx1 = lp1.x + dx1 * 0.5;
+          ny1 = lp1.y + dy1 * 0.5;
         } else {
-          lp1.setPosition(sp1.x, sp1.y);
+          nx1 = sp1.x;
+          ny1 = sp1.y;
         }
+        lp1.setPosition(nx1, ny1);
+        // Sincronizar physics body para evitar desync sprite/body
+        if (lp1.body) { lp1.body.reset(nx1, ny1); lp1.setVelocity(0, 0); }
       }
     }
 
@@ -615,9 +626,13 @@ class GameScene extends Phaser.Scene {
         var dx2  = sp2.x - lp2.x;
         var dy2  = sp2.y - lp2.y;
         var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-        if (dist > 50)       lp2.setPosition(sp2.x, sp2.y);
-        else if (dist > 3)   lp2.setPosition(lp2.x + dx2 * 0.25, lp2.y + dy2 * 0.25);
-        else if (dist > 0.5) lp2.setPosition(lp2.x + dx2 * 0.5,  lp2.y + dy2 * 0.5);
+        var nx2, ny2;
+        if (dist > 50)       { nx2 = sp2.x;                    ny2 = sp2.y; }
+        else if (dist > 3)   { nx2 = lp2.x + dx2 * 0.25;      ny2 = lp2.y + dy2 * 0.25; }
+        else if (dist > 0.5) { nx2 = lp2.x + dx2 * 0.5;       ny2 = lp2.y + dy2 * 0.5; }
+        else                 { nx2 = lp2.x;                    ny2 = lp2.y; }
+        lp2.setPosition(nx2, ny2);
+        // No resetear body de player2 — tiene input local activo
       }
     }
 

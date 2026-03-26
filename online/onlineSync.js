@@ -16,7 +16,7 @@ var OnlineSync = (function() {
   var _snapshotCb = null;
   var _inputCb    = null;
 
-  var RENDER_DELAY      = 100;
+  var RENDER_DELAY      = 66;   // 2 frames a 30/s — balance fluidez/latencia
   var BUFFER_MAX        = 32;
   var SNAPSHOT_INTERVAL = 33;   // ~30/s
   var INPUT_INTERVAL    = 50;   // 20/s max
@@ -298,7 +298,7 @@ var OnlineSync = (function() {
         if (bb) {
           var spanBt = tB - tA;
           var extra = (spanBt > 0 && spanBt < 200 && (ba.vx !== undefined || ba.vy !== undefined))
-            ? Math.min(1.15, alpha + 0.12)
+            ? Math.min(1.05, alpha + 0.04)
             : alpha;
           result.bullets.push({
             id:    ba.id,
